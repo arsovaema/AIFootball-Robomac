@@ -1,0 +1,22 @@
+1. Main branch - Sekogas stabilna verzija
+
+Flow:
+
+- Koga sakame da rabotime na nekoj feature:
+	- git checkout main
+	- git pull origin main
+	- git checkout -b <feature-name>
+	...
+	Rabotime na branchot
+	...
+	Koga sme spremni za push:
+	- git add .
+	- git commit -m"Nekoja poraka"
+	- git checkout main
+	- git pull origin main
+	- git merge <feature-name>
+	- git push origin main
+
+VAZNO: Glejte da ne rabotite na isti fajlovi od dva razlicni branches (ne 
+rabotete dvajca na ist fajl) deka pri push ke imate merge confilcts.
+Izgledajte nekoe video za merge confilcts
