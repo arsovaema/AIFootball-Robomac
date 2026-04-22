@@ -202,7 +202,7 @@ def decision(our_team, their_team, ball, your_side, half, time_left, our_score, 
             dec['alpha'] = np.pi - dec['alpha']
 
         manager_decision[i] = dec
-
+        
     return manager_decision
 
 
