@@ -1,816 +1,333 @@
-import time
-import random
-import numpy as np
-import pandas as pd
+# football_env.py
+import sys
 import os
-
-# ---------------------------------------------------------------------------
-# HEADLESS MODE FLAG
-# ---------------------------------------------------------------------------
-# Set HEADLESS = True to run without any pygame
-# Set HEADLESS = False to run with the full graphical interface 
-# The environment physics, dt, and all constants are IDENTICAL in both scenarios.
-# ---------------------------------------------------------------------------
-HEADLESS = False # <-- change this 
-
-if os.environ.get("AIFOOTBALL_HEADLESS", "0") == "1":
-    HEADLESS = True
-
-# Only import pygame when we actually need it
-if not HEADLESS:
-    import pygame
-    
-
-from Team_name import Manager as team_1_script
-from Test_team import Manager as team_2_script
-
-game_name = 'AI Football'
-fps = 60
-dt = 1 / fps        
-
-resolution = 1366, 768
-resolution_rect = [0, 0, resolution[0], resolution[1]]
-ground = [0, int(resolution[1]/5), resolution[0], resolution[1]]
-ground_rect = [ground[0], ground[1], resolution[0], resolution[1]]
-playground = [50, 50 + int(resolution[1]/5), resolution[0] - 50, resolution[1] - 50]
-playground_rect = [playground[0], playground[1], playground[2] - playground[0], playground[3] - playground[1]]
-half_playground_rect = [playground_rect[0], playground_rect[1], int(playground_rect[2]/2), playground_rect[3]]
-center = [int((playground[2] - playground[0]) / 2) + playground[0],
-          int((playground[3] - playground[1]) / 2) + playground[1]]
-
-post_radius = 10
-post_screen_top = 343
-post_screen_bottom = 578
-post_screen_left = playground[0]
-post_screen_right = playground[2]
-
-player_1_initial_position = [int((center[0] - playground[0])/2) + playground[0] - 10, post_screen_top]
-player_2_initial_position = [int((center[0] - playground[0])/2) + playground[0] - 10, center[1]]
-player_3_initial_position = [int((center[0] - playground[0])/2) + playground[0] - 10, post_screen_bottom]
-player_4_initial_position = [player_1_initial_position[0] + half_playground_rect[2] + 10, post_screen_top]
-player_5_initial_position = [player_2_initial_position[0] + half_playground_rect[2] + 10, center[1]]
-player_6_initial_position = [player_3_initial_position[0] + half_playground_rect[2] + 10, post_screen_bottom]
-
-initial_positions_team_left = [player_1_initial_position, player_2_initial_position, player_3_initial_position]
-initial_positions_team_right = [player_4_initial_position, player_5_initial_position, player_6_initial_position]
-
-# Colors
-black = [0, 0, 0]
-white = [255, 255, 255]
-red = [255, 0, 0]
-yellow = [255, 255, 0]
-green = [0, 255, 0]
-sky_blue = [135, 206, 250]
-blue = [0, 0, 255]
-grass = [1, 142, 14]
-
-cursor_width = 2
-
-ball_restitution = 0.6
-player_player_restitution = 0.9
-ball_restitution_under_player_control = 0.4
-player_post_restitution = 0.5
-half_time_duration = 45
-short_pause_countdown_time = 5
-goal_pause_countdown_time = 5
-
-shift = 230
-team_left_logo_position = [22 + shift, 2, 153, 153]
-team_right_logo_position = [527 + shift, 2, 153, 153]
-team_left_color_position = [173 + shift, 0, 50, 153]
-team_right_color_position = [477 + shift, 0, 50, 153]
-post_mass = 1e99
-
-# Player stats: Kylian Mbappé, Joshua Kimmich, Joško Gvardiol
-weights = [73, 75, 80]
-radiuses = [22, 23, 24]
-accelerations = [100, 60, 70]
-speeds = [100, 60, 85]
-shot_powers = [65, 70, 50]
-
-def get_weight(points):
-    if points <= 10:
-        return 60 + 1.5 * points
-    elif points <= 20:
-        return 65 + points
-    elif points <= 50:
-        return 75 + 0.5 * points
-    else:
-        return 100
-
-def get_radius(points):
-    if points <= 10:
-        return 21 + 0.2 * points
-    elif points <= 20:
-        return 22 + 0.1 * points
-    elif points <= 40:
-        return 23 + 0.05 * points
-    else:
-        return 25
-
-def get_acceleration(points):
-    if points <= 10:
-        return 30 + 3 * points
-    elif points <= 20:
-        return 40 + 2 * points
-    elif points <= 40:
-        return 60 + points
-    else:
-        return 100
-
-def get_speed(points):
-    if points <= 10:
-        return 30 + 3 * points
-    elif points <= 20:
-        return 40 + 2 * points
-    elif points <= 40:
-        return 60 + points
-    else:
-        return 100
-
-def get_shot_power(points):
-    if points <= 20:
-        return 10 + 2.5 * points
-    elif points <= 30:
-        return 20 + 2 * points
-    elif points <= 40:
-        return 50 + points
-    else:
-        return 90
-
-# ---------------------------------------------------------------------------
-# Game objects – no pygame dependency in logic methods
-# ---------------------------------------------------------------------------
-class Circle:
-    def __init__(self, x=0, y=0, radius=0, mass=1, alpha=0):
-        self.x = x
-        self.y = y
-        self.radius = radius
-        self.mass = mass
-        self.alpha = alpha
-        self.v = 0
-
-
-class Player(Circle):
-    a_fifa = 0.75
-    v_fifa = 0.88
-    shot_power_fifa = 0.95
-    a_max_coeff = 22
-    v_max_coeff = 7
-    shot_power_max_coeff = 200
-    a_max = a_max_coeff * a_fifa
-    v_max = v_max_coeff * v_fifa
-    shot_power_max = shot_power_max_coeff * shot_power_fifa
-    shot_power = shot_power_max
-    shot_request = False
-
-    def __init__(self, name, weight, radius, acceleration, speed, shot_power):
-        self.name = name
-        self.mass = int(weight)
-        self.radius = int(radius)
-        self.a_fifa = int(acceleration)
-        self.v_fifa = int(speed)
-        self.shot_power_fifa = int(shot_power)
-        self.v_max = self.v_max_coeff * self.v_fifa
-        self.a_max = self.a_max_coeff * self.a_fifa
-        self.shot_power_max = self.shot_power_max_coeff * self.shot_power_fifa
-
-    def move(self, manager_decision):
-        force = np.clip(manager_decision['force'], -0.5 * self.a_max * self.mass, self.a_max * self.mass)
-        self.alpha = manager_decision['alpha']
-        self.shot_power = np.clip(manager_decision['shot_power'], 0, self.shot_power_max)
-        self.shot_request = manager_decision['shot_request']
-        self.v += force / self.mass * dt
-        self.v = np.clip(self.v, 0, self.v_max)
-        self.x += np.cos(self.alpha) * self.v * dt
-        self.y += np.sin(self.alpha) * self.v * dt
-        self.x = np.clip(self.x, ground_rect[0], ground_rect[2])
-        self.y = np.clip(self.y, ground_rect[1], ground_rect[3])
-
-    def draw(self, screen, color):
-        """Draw player – only called when not HEADLESS."""
-        pygame.draw.circle(screen, color, [int(self.x), int(self.y)], self.radius)
-        new_x = self.x + self.radius * np.cos(self.alpha)
-        new_y = self.y + self.radius * np.sin(self.alpha)
-        pygame.draw.line(screen, black, [self.x, self.y], [new_x, new_y], cursor_width)
-
-    def data(self):
-        player_data = {'x': self.x, 'y': self.y, 'alpha': self.alpha,
-                       'mass': self.mass, 'radius': self.radius,
-                       'a_max': self.a_max, 'v_max': self.v_max, 'shot_power_max': self.shot_power_max,
-                       }
-        return player_data
-
-    def snelius(self):
-        if self.y + self.radius >= ground[3] and np.sin(self.alpha) > 0:
-            self.alpha = -self.alpha
-            self.v *= np.abs(np.cos(self.alpha))
-        if self.y - self.radius <= ground[1] and np.sin(self.alpha) < 0:
-            self.alpha = -self.alpha
-            self.v *= np.abs(np.cos(self.alpha))
-        if self.x + self.radius >= ground[2] and np.cos(self.alpha) > 0:
-            self.alpha = np.pi - self.alpha
-            self.v *= np.abs(np.sin(self.alpha))
-        if self.x - self.radius <= ground[0] and np.cos(self.alpha) < 0:
-            self.alpha = -np.pi - self.alpha
-            self.v *= np.abs(np.sin(self.alpha))
-
-    def reset(self, initial_position, alpha):
-        self.x = initial_position[0]
-        self.y = initial_position[1]
-        self.alpha = alpha
-        self.v = 0
-
-    def clip_velocity(self):
-        self.v = np.clip(self.v, 0, self.v_max)
-
-
-class Ball(Circle):
-    v_max = 850
-    radius = 15
-    mass = 0.5
-
-    def move(self):
-        self.x += np.cos(self.alpha) * self.v * dt
-        self.y += np.sin(self.alpha) * self.v * dt
-        self.v *= 0.99
-
-    def draw(self, screen):
-        """Draw ball – only called when not HEADLESS."""
-        pygame.draw.circle(screen, black, [int(self.x), int(self.y)], self.radius)
-        pygame.draw.circle(screen, white, [int(self.x), int(self.y)], self.radius - 2)
-
-    def snelius(self):
-        goal = post_screen_top < self.y < post_screen_bottom
-        if self.y + self.radius >= playground[3] and np.sin(self.alpha) > 0:
-            self.alpha = -self.alpha
-            self.y = playground[3] - self.radius
-        if self.y - self.radius <= playground[1] and np.sin(self.alpha) < 0:
-            self.alpha = -self.alpha
-            self.y = playground[1] + self.radius
-        if self.x + self.radius >= playground[2] and np.cos(self.alpha) > 0 and not goal:
-            self.alpha = np.pi - self.alpha
-            self.x = playground[2] - self.radius
-        if self.x - self.radius <= playground[0] and np.cos(self.alpha) < 0 and not goal:
-            self.alpha = -np.pi - self.alpha
-            self.x = playground[0] + self.radius
-
-    def reset(self):
-        self.x = center[0]
-        self.y = center[1]
-        self.alpha = 0
-        self.v = 0
-
-    def data(self):
-        ball_data = {'x': self.x, 'y': self.y, 'alpha': self.alpha, 'mass': self.mass, 'radius': self.radius}
-        return ball_data
-
-    def clip_velocity(self):
-        self.v = np.clip(self.v, 0, self.v_max)
-
-
-class Post(Circle):
-    def draw(self, screen):
-        """Draw post – only called when not HEADLESS."""
-        pygame.draw.circle(screen, white, [int(self.x), int(self.y)], self.radius)
-
-
-# ---------------------------------------------------------------------------
-# Physics helpers – completely mode-independent
-# ---------------------------------------------------------------------------
-def collision(circle_1, circle_2):
-    return (circle_1.x - circle_2.x)**2 + (circle_1.y - circle_2.y)**2 <= (circle_1.radius + circle_2.radius)**2
-
-
-def resolve_collision(circle_1, circle_2):
-    collision_angle = np.arctan2(circle_2.y - circle_1.y, circle_2.x - circle_1.x)
-
-    new_x_speed_1 = circle_1.v * np.cos(circle_1.alpha - collision_angle)
-    new_y_speed_1 = circle_1.v * np.sin(circle_1.alpha - collision_angle)
-    new_x_speed_2 = circle_2.v * np.cos(circle_2.alpha - collision_angle)
-    new_y_speed_2 = circle_2.v * np.sin(circle_2.alpha - collision_angle)
-
-    final_x_speed_1 = ((circle_1.mass - circle_2.mass) * new_x_speed_1
-                       + (circle_2.mass + circle_2.mass) * new_x_speed_2) / (circle_1.mass + circle_2.mass)
-    final_x_speed_2 = ((circle_1.mass + circle_1.mass) * new_x_speed_1
-                       + (circle_2.mass - circle_1.mass) * new_x_speed_2) / (circle_1.mass + circle_2.mass)
-    final_y_speed_1 = new_y_speed_1
-    final_y_speed_2 = new_y_speed_2
-
-    cos_gamma = np.cos(collision_angle)
-    sin_gamma = np.sin(collision_angle)
-    circle_1.v_x = cos_gamma * final_x_speed_1 - sin_gamma * final_y_speed_1
-    circle_1.v_y = sin_gamma * final_x_speed_1 + cos_gamma * final_y_speed_1
-    circle_2.v_x = cos_gamma * final_x_speed_2 - sin_gamma * final_y_speed_2
-    circle_2.v_y = sin_gamma * final_x_speed_2 + cos_gamma * final_y_speed_2
-
-    x_difference = circle_1.x - circle_2.x
-    y_difference = circle_1.y - circle_2.y
-    d = np.linalg.norm([x_difference, y_difference])
-
-    mtd_x = x_difference * (((circle_1.radius + circle_2.radius) - d) / d)
-    mtd_y = y_difference * (((circle_1.radius + circle_2.radius) - d) / d)
-    im1 = 1 / circle_1.mass if circle_1.mass > 0 else 0
-    im2 = 1 / circle_2.mass if circle_2.mass > 0 else 0
-
-    circle_1.x += mtd_x * (im1 / (im1 + im2))
-    circle_1.y += mtd_y * (im1 / (im1 + im2))
-    circle_2.x -= mtd_x * (im2 / (im1 + im2))
-    circle_2.y -= mtd_y * (im2 / (im1 + im2))
-
-    if isinstance(circle_1, Player) and isinstance(circle_2, Player):
-        circle_1.v = player_player_restitution * np.sqrt(circle_1.v_x**2 + circle_1.v_y**2)
-        circle_2.v = player_player_restitution * np.sqrt(circle_2.v_x**2 + circle_2.v_y**2)
-    if isinstance(circle_1, Player) and isinstance(circle_2, Ball):
-        circle_1.v = np.sqrt(circle_1.v_x**2 + circle_1.v_y**2)
-        if circle_1.shot_request:
-            circle_2.v = np.sqrt(circle_2.v_x**2 + circle_2.v_y**2)
-            circle_2.v = circle_1.shot_power * circle_1.mass / (circle_1.mass + circle_2.mass) * (1 + ball_restitution)
-        else:
-            circle_2.v = ball_restitution_under_player_control * np.sqrt(circle_2.v_x**2 + circle_2.v_y**2)
-    if isinstance(circle_1, Player) and isinstance(circle_2, Post):
-        circle_1.v = player_post_restitution * np.sqrt(circle_1.v_x**2 + circle_1.v_y**2)
-        circle_2.v = 0
-    if isinstance(circle_1, Ball) and isinstance(circle_2, Post):
-        circle_1.v = np.sqrt(circle_1.v_x**2 + circle_1.v_y**2)
-        circle_2.v = 0
-
-    circle_1.alpha = np.arctan2(circle_1.v_y, circle_1.v_x)
-    circle_2.alpha = np.arctan2(circle_2.v_y, circle_2.v_x)
-
-    for circle in [circle_1, circle_2]:
-        if isinstance(circle, Player) or isinstance(circle, Ball):
-            circle.clip_velocity()
-            circle.snelius()
-
-    return circle_1, circle_2
-
-
-# ---------------------------------------------------------------------------
-# Rendering helpers – only called when not HEADLESS
-# ---------------------------------------------------------------------------
-def render_goal_pause(start_goal, screen):
-    myfont = pygame.font.SysFont("monospace", 350)
-    message = "GOAL!"
-    label = myfont.render(message, True, (0, 0, 0))
-    while int(time.time() - start_goal) < goal_pause_countdown_time:
-        screen.blit(label, (200, 250))
-        pygame.display.flip()
-
-
-def render(screen, team_1, team_2, ball, posts, team_1_score, team_2_score, time_to_play, start, half, countdown,
-           team_1_name, team_2_name, team_1_color, team_2_color):
-
-    pygame.draw.rect(screen, white, resolution_rect)
-    pygame.draw.rect(screen, grass, ground_rect)
-    pygame.draw.rect(screen, black, resolution_rect, 2)
-    pygame.draw.rect(screen, black, ground_rect, 2)
-    pygame.draw.rect(screen, white, playground_rect, 2)
-    pygame.draw.rect(screen, white, half_playground_rect, 2)
-    pygame.draw.circle(screen, white, center, 100, 2)
-    pygame.draw.circle(screen, white, center, 5)
-
-    if half == 1:
-        team_left_logo = logos[team_1_name]
-        team_right_logo = logos[team_2_name]
-
-        font = pygame.font.SysFont("roboto", 50)
-        img = font.render(team_1_name, True, (0, 0, 0))
-        screen.blit(img, (10, 60))
-
-        font = pygame.font.SysFont("roboto", 50)
-        img = font.render(team_2_name, True, (0, 0, 0))
-        screen.blit(img, (915, 60))
-
-        team_left_color = team_1_color
-        team_right_color = team_2_color
-    else:
-        team_left_logo = logos[team_2_name]
-        team_right_logo = logos[team_1_name]
-
-        font = pygame.font.SysFont("roboto", 45)
-        img = font.render(team_1_name, True, (0, 0, 0))
-        screen.blit(img, (915, 60))
-
-        font = pygame.font.SysFont("roboto", 45)
-        img = font.render(team_2_name, True, (0, 0, 0))
-        screen.blit(img, (10, 60))
-
-        team_left_color = team_2_color
-        team_right_color = team_1_color
-
-    screen.blit(team_left_logo, team_left_logo_position)
-    screen.blit(team_right_logo, team_right_logo_position)
-
-    pygame.draw.rect(screen, team_left_color, team_left_color_position)
-    pygame.draw.rect(screen, team_right_color, team_right_color_position)
-
-    for player in team_1:
-        player.draw(screen, team_1_color)
-        font = pygame.font.SysFont("roboto", 30)
-    for player in team_2:
-        player.draw(screen, team_2_color)
-        font = pygame.font.SysFont("roboto", 30)
-    for player in team_1 + team_2:
-        img = font.render(player.name, True, (0, 0, 0))
-        screen.blit(img, (player.x - 50, player.y - 50))
-    ball.draw(screen)
-    for post in posts:
-        post.draw(screen)
-
-    if countdown:
-        myfont = pygame.font.SysFont("monospace", 750)
-        short_pause_countdown = "{}".format(short_pause_countdown_time - int(time.time() - start))
-        label = myfont.render(short_pause_countdown, 1, (0, 0, 0))
-        screen.blit(label, (460, 85))
-
-        myfont = pygame.font.SysFont("monospace", 120)
-        message = "{}s".format(time_to_play)
-        label = myfont.render(message, 1, (0, 0, 0))
-        screen.blit(label, (1150, 0))
-    else:
-        myfont = pygame.font.SysFont("monospace", 120)
-        time_screen_value = time_to_play - int(time.time() - start)
-        if time_screen_value < 0:
-            time_screen_value = 0
-        message = "{}s".format(time_screen_value)
-        label = myfont.render(message, 1, (0, 0, 0))
-        screen.blit(label, (1150, 0))
-
-    myfont = pygame.font.SysFont("roboto", 40)
-    if half == 1:
-        message = "полувреме: 1"
-    else:
-        message = "полувреме: 2"
-    label = myfont.render(message, 1, (0, 0, 0))
-    screen.blit(label, (1175, 125))
-
-    myfont = pygame.font.SysFont("monospace", 150)
-    if half == 1:
-        message = "{}:{}".format(team_1_score, team_2_score)
-    else:
-        message = "{}:{}".format(team_2_score, team_1_score)
-    label = myfont.render(message, 1, (0, 0, 0))
-    screen.blit(label, (215 + shift, 0))
-
-    pygame.display.flip()
-    pygame.time.Clock().tick(fps)
-
-
-# ---------------------------------------------------------------------------
-# Core physics step – shared by both modes 
-# ---------------------------------------------------------------------------
-def physics_step(circles, team_1, team_2, ball, posts,
-                 team_1_score, team_2_score, half,
-                 team_1_script, team_2_script,
-                 manager_1_last_decision, manager_2_last_decision,
-                 start, time_to_play, goal,
-                 screen=None,
-                 team_1_name=None, team_2_name=None,
-                 team_1_color=None, team_2_color=None):
-    scored_goal = False
-
-    if not goal:
-        try:
-            manager_1_decision = team_1_script.decision(
-                our_team=[team_1[0].data(), team_1[1].data(), team_1[2].data()],
-                their_team=[team_2[0].data(), team_2[1].data(), team_2[2].data()],
-                ball=ball.data(),
-                your_side='left' if half == 1 else 'right',
-                half=half,
-                time_left=time_to_play - int(time.time() - start),
-                our_score=team_1_score,
-                their_score=team_2_score)
-        except Exception:
-            manager_1_decision = manager_1_last_decision
-        manager_1_last_decision = manager_1_decision
-
-        try:
-            manager_2_decision = team_2_script.decision(
-                our_team=[team_2[0].data(), team_2[1].data(), team_2[2].data()],
-                their_team=[team_1[0].data(), team_1[1].data(), team_1[2].data()],
-                ball=ball.data(),
-                your_side='right' if half == 1 else 'left',
-                half=half,
-                time_left=time_to_play - int(time.time() - start),
-                our_score=team_2_score,
-                their_score=team_1_score)
-        except Exception:
-            manager_2_decision = manager_2_last_decision
-        manager_2_last_decision = manager_2_decision
-
-    manager_decision = [manager_1_decision[0], manager_1_decision[1], manager_1_decision[2],
-                        manager_2_decision[0], manager_2_decision[1], manager_2_decision[2]]
-
-    for i, player in enumerate(circles[:6]):
-        player.move(manager_decision[i])
-    ball.move()
-
-    if not goal:
-        goal_team_right = post_screen_top < ball.y < post_screen_bottom and ball.x < post_screen_left
-        goal_team_left = post_screen_top < ball.y < post_screen_bottom and ball.x > post_screen_right
-        if goal_team_left:
-            if half == 1:
-                team_1_score += 1
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import functools
+import numpy as np
+from pettingzoo import ParallelEnv
+from gymnasium import spaces
+from AIFootball import Player, Ball, dt, resolve_collision, initial_positions_team_left
+
+# ── Константи ──────────────────────────────────────────────────────────────
+FIELD_W      = 1366.0
+FIELD_H      = 768.0
+GOAL_X_LEFT  = 50
+GOAL_X_RIGHT = 1316
+GOAL_TOP     = 343
+GOAL_BOT     = 578
+GOAL_CY      = (GOAL_TOP + GOAL_BOT) / 2
+
+GK_X_LOCK  = 85
+GK_Y_MIN   = GOAL_TOP
+GK_Y_MAX   = GOAL_BOT
+GK_GOAL_CY = GOAL_CY
+
+
+class AIFootballEnv(ParallelEnv):
+    metadata = {"name": "aifootball_v0"}
+
+    def __init__(self, render_mode=None):
+        super().__init__()
+        self.render_mode     = render_mode
+        self.possible_agents = ["gk", "def", "att"]
+        self.agents          = self.possible_agents[:]
+        self.max_force       = 200 * 0.75
+        self.max_shot_power  = 200 * 0.95
+
+    # ── Observation spaces — различни за секој агент ──────────────────────
+    @functools.lru_cache(maxsize=None)
+    def observation_space(self, agent):
+        if agent == "gk":
+            return spaces.Box(low=-1.0, high=1.0, shape=(5,), dtype=np.float32)
+        elif agent == "def":
+            return spaces.Box(low=-1.0, high=1.0, shape=(12,), dtype=np.float32)
+        else:  # att
+            return spaces.Box(low=-1.0, high=1.0, shape=(12,), dtype=np.float32)
+
+    # ── Action spaces — различни за секој агент ───────────────────────────
+    @functools.lru_cache(maxsize=None)
+    def action_space(self, agent):
+        if agent == "gk":
+            return spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
+        elif agent == "def":
+            return spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
+        else:  # att
+            return spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
+
+    # ── Reset ─────────────────────────────────────────────────────────────
+    def reset(self, seed=None, options=None):
+        self.agents   = self.possible_agents[:]
+        self.timestep = 0
+
+        # FIX 6: flag за да се регистрира гол само еднаш
+        self.goal_scored = False
+
+        self.our_team = {
+            "gk":  Player("Nate",   weight=20, radius=20, acceleration=40, speed=40, shot_power=30),
+            "def": Player("Maddie", weight=15, radius=15, acceleration=10, speed=15, shot_power=25),
+            "att": Player("Cassie", weight=15, radius=20, acceleration=15, speed=25, shot_power=18),
+        }
+
+        self.our_team["gk"].x     = GK_X_LOCK
+        self.our_team["gk"].y     = GK_GOAL_CY
+        self.our_team["gk"].alpha = 0
+        self.our_team["gk"].v     = 0
+
+        self.our_team["def"].reset(initial_positions_team_left[1], 0)
+        self.our_team["att"].reset(initial_positions_team_left[2], 0)
+
+        self.ball = Ball()
+        self.ball.reset()
+
+        # FIX 3: иницијализирај prev_dist_* веднаш во reset() за да не се добие
+        # AttributeError при првиот повик на _reward_gk() / _reward_def()
+        att  = self.our_team["att"]
+        gk   = self.our_team["gk"]
+        defp = self.our_team["def"]
+        self.prev_dist_att_gk  = np.sqrt((att.x  - gk.x)**2   + (att.y  - gk.y)**2)
+        self.prev_dist_def_gk  = np.sqrt((defp.x - gk.x)**2   + (defp.y - gk.y)**2)
+        self.prev_dist_att_def = np.sqrt((att.x  - defp.x)**2  + (att.y  - defp.y)**2)
+
+        observations = {agent: self._get_obs(agent) for agent in self.agents}
+        infos        = {agent: {}                   for agent in self.agents}
+        return observations, infos
+
+    # ── Step ──────────────────────────────────────────────────────────────
+    def step(self, actions):
+        self.timestep += 1
+
+        # 1. ГОЛМАНОТ — само Y движење
+        gk     = self.our_team["gk"]
+        new_y  = np.clip(gk.y + actions["gk"][0] * gk.v_max * dt, GK_Y_MIN, GK_Y_MAX)
+        gk.x   = GK_X_LOCK
+        gk.y   = new_y
+        gk.v   = 0
+
+        # 2. DEF и ATT — полна контрола
+        for agent_id in ["def", "att"]:
+            action_array = actions[agent_id]
+            player       = self.our_team[agent_id]
+            decision     = {
+                "force":        action_array[0] * self.max_force,
+                "alpha":        action_array[1] * np.pi,
+                "shot_power":   abs(action_array[2] * self.max_shot_power),
+                "shot_request": action_array[3] > 0,
+            }
+            player.move(decision)
+
+        # 3. PHYSICS
+        self.ball.move()
+        self.ball.snelius()
+        for player in self.our_team.values():
+            player.snelius()
+            if self._check_collision(player, self.ball):
+                resolve_collision(player, self.ball)
+
+        # 4. Заклучи го голманот по колизии
+        gk.x = GK_X_LOCK
+        gk.y = np.clip(gk.y, GK_Y_MIN, GK_Y_MAX)
+        gk.v = 0
+
+        # Пресметај тековни дистанци
+        att  = self.our_team["att"]
+        gk   = self.our_team["gk"]
+        defp = self.our_team["def"]
+        curr_dist_att_gk  = np.sqrt((att.x  - gk.x)**2   + (att.y  - gk.y)**2)
+        curr_dist_def_gk  = np.sqrt((defp.x - gk.x)**2   + (defp.y - gk.y)**2)
+        curr_dist_att_def = np.sqrt((att.x  - defp.x)**2  + (att.y  - defp.y)**2)
+
+        # Зачувај за rewards
+        self.curr_dist_att_gk  = curr_dist_att_gk
+        self.curr_dist_def_gk  = curr_dist_def_gk
+        self.curr_dist_att_def = curr_dist_att_def
+
+        # FIX 6: провери гол само ако уште не е регистриран
+        just_scored_goal = False
+        if not self.goal_scored:
+            if (self.ball.x > GOAL_X_RIGHT and
+    GOAL_TOP < self.ball.y < GOAL_BOT):
+                self.goal_scored  = True
+                just_scored_goal  = True
+
+        # FIX 1+2: само едно место за rewards, без дупликат
+        rewards = {
+            "gk":  self._reward_gk(),
+            "def": self._reward_def(just_scored_goal),
+            "att": self._reward_att(just_scored_goal),
+        }
+
+        # Ажурирај претходни дистанци — само еднаш, на крај
+        self.prev_dist_att_gk  = curr_dist_att_gk
+        self.prev_dist_def_gk  = curr_dist_def_gk
+        self.prev_dist_att_def = curr_dist_att_def
+
+        # 6. END STATE
+        env_done     = self.timestep >= 3000 or self.goal_scored
+        terminations = {agent: env_done for agent in self.agents}
+        truncations  = {agent: False    for agent in self.agents}
+        infos        = {agent: {}       for agent in self.agents}
+        observations = {agent: self._get_obs(agent) for agent in self.agents}
+
+        if env_done:
+            self.agents = []
+
+        return observations, rewards, terminations, truncations, infos
+
+    # ── Observations ──────────────────────────────────────────────────────
+    def _get_obs(self, agent_id):
+        player = self.our_team[agent_id]
+
+        def nx(v): return (v / FIELD_W) * 2.0 - 1.0
+        def ny(v): return (v / FIELD_H) * 2.0 - 1.0
+        def nv(v, mx): return np.clip(v / max(mx, 1), 0, 1) * 2.0 - 1.0
+
+        ball = self.ball
+
+        if agent_id == "gk":
+            dist = np.sqrt((ball.x - player.x)**2 + (ball.y - player.y)**2)
+            return np.array([
+                ny(player.y),
+                nx(ball.x),
+                ny(ball.y),
+                nv(ball.v, ball.v_max),
+                np.clip(dist / FIELD_W, 0, 1) * 2 - 1,
+            ], dtype=np.float32)
+
+        elif agent_id == "def":
+            att = self.our_team["att"]
+            return np.array([
+                nx(player.x),  ny(player.y),
+                nv(player.v, player.v_max),
+                player.alpha / np.pi,
+                nx(ball.x),    ny(ball.y),
+                nv(ball.v, ball.v_max),
+                ball.alpha / np.pi,
+                nx(att.x),     ny(att.y),
+                nx(GOAL_X_RIGHT), ny(GOAL_CY),
+            ], dtype=np.float32)
+
+        else:  # att
+            defp = self.our_team["def"]
+            return np.array([
+                nx(player.x),  ny(player.y),
+                nv(player.v, player.v_max),
+                player.alpha / np.pi,
+                nx(ball.x),    ny(ball.y),
+                nv(ball.v, ball.v_max),
+                ball.alpha / np.pi,
+                nx(defp.x),    ny(defp.y),
+                nx(GOAL_X_RIGHT), ny(GOAL_CY),
+            ], dtype=np.float32)
+
+    # ── Collision check ───────────────────────────────────────────────────
+    def _check_collision(self, c1, c2):
+        return (c1.x-c2.x)**2 + (c1.y-c2.y)**2 <= (c1.radius+c2.radius)**2
+
+    def _proximity_penalty(self, agent_id):
+        player  = self.our_team[agent_id]
+        penalty = 0.0
+
+        for other_id, other in self.our_team.items():
+            if other_id == agent_id:
+                continue
+            dist     = np.sqrt((player.x - other.x)**2 + (player.y - other.y)**2)
+            min_dist = player.radius + other.radius
+            safe_dist = min_dist * 4
+
+            if dist < safe_dist:
+                penalty -= (1.0 - dist / safe_dist) * 50.0
+
+        return penalty
+
+    # ── Rewards ───────────────────────────────────────────────────────────
+    def _reward_gk(self):
+        gk   = self.our_team["gk"]
+        ball = self.ball
+
+        # Казна ако топката влезе во сопствениот гол
+        if ball.x < GOAL_X_LEFT and GOAL_TOP < ball.y < GOAL_BOT:
+            return -100.0
+
+        reward = 0.0
+
+        # Порамнување по Y со топката
+        ideal_y = np.clip(ball.y, GK_Y_MIN, GK_Y_MAX)
+        dy      = abs(gk.y - ideal_y)
+        reward += max(0.0, 1.0 - dy / 120.0)
+
+        #reward += self._proximity_penalty("gk")
+        return reward
+
+    # FIX 5: just_scored_goal параметар — само att и def добиваат гол reward
+    def _reward_def(self, just_scored_goal=False):
+        player = self.our_team["def"]
+        ball   = self.ball
+        reward = 0.0
+
+        # FIX 5: def добива reward за гол (но не толку голем колку att)
+        if just_scored_goal:
+            return 50.0
+
+        dist_to_ball = np.sqrt((ball.x - player.x)**2 + (ball.y - player.y)**2)
+
+        # Трча кон топка
+        reward += max(0.0, 1.5 - dist_to_ball / 400.0)
+
+#        # Допир во одбранбена зона
+        touched = dist_to_ball < (player.radius + ball.radius + 5)
+#        if touched and player.x < 683:
+#            reward += 5.0
+
+        # Топката оди напред по допир
+        if touched and np.cos(ball.alpha) > 0.3 and ball.v > 50:
+            reward += 3.0
+
+        # Formation: стој помеѓу gk и att
+#        gk  = self.our_team["gk"]
+#        att = self.our_team["att"]
+#        ideal_x = (gk.x + att.x) / 2.0
+#        ideal_y = (gk.y + att.y) / 2.0
+#        dist_ideal = np.sqrt((ideal_x - player.x)**2 + (ideal_y - player.y)**2)
+#        reward += max(0.0, 0.5 - dist_ideal / 400.0)
+
+        # Ако att и def се преклопуваат
+        att = self.our_team["att"]
+        min_att_def = player.radius + att.radius
+        if self.curr_dist_att_def < min_att_def:
+            if self.curr_dist_att_def > self.prev_dist_att_def:
+                reward += 5.0
             else:
-                team_2_score += 1
-        if goal_team_right:
-            if half == 1:
-                team_2_score += 1
-            else:
-                team_1_score += 1
-        goal = goal_team_left or goal_team_right
-        scored_goal = goal
+                reward -= 5.0
 
-    if not goal:
-        for i in range(len(circles[:-4])):
-            circles[i].snelius()
-            for j in range(i + 1, len(circles)):
-                if collision(circles[i], circles[j]):
-                    circles[i], circles[j] = resolve_collision(circles[i], circles[j])
+        reward += self._proximity_penalty("def")
+        return reward
 
-    # Render only when graphics are enabled
-    if not HEADLESS and screen is not None:
-        render(screen, team_1, team_2, ball, posts,
-               team_1_score, team_2_score, time_to_play, start, half, False,
-               team_1_name, team_2_name, team_1_color, team_2_color)
+    # FIX 5: just_scored_goal параметар — att добива biggest reward за гол
+    def _reward_att(self, just_scored_goal=False):
+        player = self.our_team["att"]
+        ball   = self.ball
+        reward = 0.0
 
-    return goal, team_1_score, team_2_score, manager_1_last_decision, manager_2_last_decision, scored_goal
+        # FIX 5+6: гол се регистрира преку just_scored_goal flag, не секој frame
+        if just_scored_goal:
+            return 100.0
 
+        dist_to_ball = np.sqrt((ball.x - player.x)**2 + (ball.y - player.y)**2)
 
-# ---------------------------------------------------------------------------
-# play() – one kick-off segment (graphical mode)
-# ---------------------------------------------------------------------------
-def play(screen, team_1, team_2, ball, posts, time_to_play, team_1_score, team_2_score, half, team_1_name,
-         team_2_name, team_1_color, team_2_color, team_1_script, team_2_script):
-    """Graphical game loop for one kick-off period."""
+        # Допир со топката
+        touched = dist_to_ball < (player.radius + ball.radius + 5)
+        if touched:
+            reward += 10.0
+            if np.cos(ball.alpha) > 0.5 and ball.v > 30:
+                reward += 3.0
 
-    start = time.time()
-    # Short pre-kick countdown with rendering
-    while time.time() - start < short_pause_countdown_time:
-        render(screen, team_1, team_2, ball, posts, team_1_score, team_2_score, time_to_play, start, half, True,
-               team_1_name, team_2_name, team_1_color, team_2_color)
+        # Трча кон топката
+        reward += max(0.0, 2.0 - dist_to_ball / 300.0)
 
-    start = time.time()
-    circles = [team_1[0], team_1[1], team_1[2], team_2[0], team_2[1], team_2[2], ball, posts[0], posts[1], posts[2], posts[3]]
-    goal = False
-    game_exit = False
-    manager_1_last_decision = {}
-    manager_2_last_decision = {}
+        # Топката е блиску до противничката врата
+        dist_ball_goal = np.sqrt((GOAL_X_RIGHT - ball.x)**2 + (GOAL_CY - ball.y)**2)
+        reward += max(0.0, 2.0 - dist_ball_goal / 600.0)
 
-    while not game_exit:
-        if time.time() - start >= time_to_play:
-            if ball.v <= 50:
-                return False, 0, team_1_score, team_2_score
-            if ball.x <= center[0] and np.cos(ball.alpha) >= 0:
-                return False, 0, team_1_score, team_2_score
-            if ball.x >= center[0] and np.cos(ball.alpha) <= 0:
-                return False, 0, team_1_score, team_2_score
-
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                game_exit = True
-            if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
-                    game_exit = True
-
-        (goal, team_1_score, team_2_score,
-         manager_1_last_decision, manager_2_last_decision,
-         scored_goal) = physics_step(
-            circles, team_1, team_2, ball, posts,
-            team_1_score, team_2_score, half,
-            team_1_script, team_2_script,
-            manager_1_last_decision, manager_2_last_decision,
-            start, time_to_play, goal,
-            screen=screen,
-            team_1_name=team_1_name, team_2_name=team_2_name,
-            team_1_color=team_1_color, team_2_color=team_2_color)
-
-        if scored_goal:
-            render_goal_pause(time.time(), screen)
-            start += goal_pause_countdown_time
-            return True, time_to_play - int(time.time() - start), team_1_score, team_2_score
-
-    return False, 0, team_1_score, team_2_score
-
-
-# ---------------------------------------------------------------------------
-# play_headless() – one kick-off segment (headless)
-# ---------------------------------------------------------------------------
-def play_headless(team_1, team_2, ball, posts, time_to_play, team_1_score, team_2_score, half,
-                  team_1_script, team_2_script):
-    """
-    Headless simulation of one kick-off period.
-
-    Time is simulated in fixed dt steps; no real-time waiting.
-    The kick-off pause (short_pause_countdown_time) and goal pause
-    (goal_pause_countdown_time) are still honoured as logical step counts
-    so that the total simulated time matches the graphical version exactly.
-    """
-    # Simulate the pre-kick countdown as pure step advancement
-    countdown_steps = int(short_pause_countdown_time / dt)
-    for _ in range(countdown_steps):
-        pass  # Players are stationary; no decisions needed during countdown
-
-    # Main simulation: track simulated elapsed time via step counter
-    elapsed = 0.0
-    circles = [team_1[0], team_1[1], team_1[2], team_2[0], team_2[1], team_2[2],
-               ball, posts[0], posts[1], posts[2], posts[3]]
-    goal = False
-    manager_1_last_decision = {}
-    manager_2_last_decision = {}
-
-    # Create a fake "start" reference so physics_step can compute time_left
-    # In headless mode we use the simulated elapsed time, not wall-clock time.
-    # We monkey-patch time.time via a closure – simpler: pass a lambda start
-    # that returns (current_time - elapsed) so that (time.time() - start) == elapsed.
-    sim_start_ref = [time.time() - elapsed]  # mutable reference
-
-    while elapsed < time_to_play:
-        # End-of-half ball-still check (mirrors graphical logic)
-        if elapsed >= time_to_play:
-            if ball.v <= 50:
-                return False, 0, team_1_score, team_2_score
-            if ball.x <= center[0] and np.cos(ball.alpha) >= 0:
-                return False, 0, team_1_score, team_2_score
-            if ball.x >= center[0] and np.cos(ball.alpha) <= 0:
-                return False, 0, team_1_score, team_2_score
-
-        # Build a fake start so that (time.time() - fake_start) ≈ elapsed
-        fake_start = time.time() - elapsed
-
-        (goal, team_1_score, team_2_score,
-         manager_1_last_decision, manager_2_last_decision,
-         scored_goal) = physics_step(
-            circles, team_1, team_2, ball, posts,
-            team_1_score, team_2_score, half,
-            team_1_script, team_2_script,
-            manager_1_last_decision, manager_2_last_decision,
-            fake_start, time_to_play, goal,
-            screen=None)  # no rendering
-
-        elapsed += dt
-
-        if scored_goal:
-            # Advance simulated time by goal pause duration
-            elapsed += goal_pause_countdown_time
-            return True, time_to_play - elapsed, team_1_score, team_2_score
-
-    return False, 0, team_1_score, team_2_score
-
-
-# ---------------------------------------------------------------------------
-# game() – full match (graphical)
-# ---------------------------------------------------------------------------
-def game(team_1, team_2, ball, posts, team_1_name, team_2_name, team_1_color, team_2_color, team_1_script,
-         team_2_script):
-    pygame.init()
-    screen = pygame.display.set_mode(resolution, pygame.RESIZABLE)
-    pygame.display.set_caption(game_name)
-    team_1_score, team_2_score = 0, 0
-
-    pygame.mixer.init(22050, -16, 2, 2048)
-    base_path = os.path.dirname(__file__)
-    pygame.mixer.music.load(os.path.join(base_path, 'football_crowd.ogg'))
-    pygame.mixer.music.play(10, 14)
-
-    initial_positions_team_left, initial_positions_team_right = randomize_initial_positions()
-
-    time_to_play = half_time_duration
-    while time_to_play:
-        for i, player in enumerate(team_1):
-            player.reset(initial_positions_team_left[i], 0)
-        for i, player in enumerate(team_2):
-            player.reset(initial_positions_team_right[i], np.pi)
-        ball.reset()
-        goal, time_to_play, team_1_score, team_2_score = \
-            play(screen, team_1, team_2, ball, posts, time_to_play, team_1_score, team_2_score, 1, team_1_name,
-                 team_2_name, team_1_color, team_2_color, team_1_script, team_2_script)
-        initial_positions_team_left, initial_positions_team_right = randomize_initial_positions()
-
-    time_to_play = half_time_duration
-    while time_to_play:
-        for i, player in enumerate(team_2):
-            player.reset(initial_positions_team_left[i], 0)
-        for i, player in enumerate(team_1):
-            player.reset(initial_positions_team_right[i], np.pi)
-        ball.reset()
-        goal, time_to_play, team_1_score, team_2_score = \
-            play(screen, team_1, team_2, ball, posts, time_to_play, team_1_score, team_2_score, 2, team_1_name,
-                 team_2_name, team_1_color, team_2_color, team_1_script, team_2_script)
-        initial_positions_team_left, initial_positions_team_right = randomize_initial_positions()
-
-    time.sleep(6)
-    pygame.quit()
-    return team_1_score, team_2_score
-
-
-# ---------------------------------------------------------------------------
-# game_headless() – full match (headless)
-# ---------------------------------------------------------------------------
-def game_headless(team_1, team_2, ball, posts, team_1_script, team_2_script):
-    team_1_score, team_2_score = 0, 0
-    initial_positions_team_left, initial_positions_team_right = randomize_initial_positions()
-
-    # First half
-    time_to_play = half_time_duration
-    while time_to_play:
-        for i, player in enumerate(team_1):
-            player.reset(initial_positions_team_left[i], 0)
-        for i, player in enumerate(team_2):
-            player.reset(initial_positions_team_right[i], np.pi)
-        ball.reset()
-        goal, time_to_play, team_1_score, team_2_score = \
-            play_headless(team_1, team_2, ball, posts, time_to_play, team_1_score, team_2_score, 1,
-                          team_1_script, team_2_script)
-        initial_positions_team_left, initial_positions_team_right = randomize_initial_positions()
-
-    # Second half (sides swap)
-    time_to_play = half_time_duration
-    while time_to_play:
-        for i, player in enumerate(team_2):
-            player.reset(initial_positions_team_left[i], 0)
-        for i, player in enumerate(team_1):
-            player.reset(initial_positions_team_right[i], np.pi)
-        ball.reset()
-        goal, time_to_play, team_1_score, team_2_score = \
-            play_headless(team_1, team_2, ball, posts, time_to_play, team_1_score, team_2_score, 2,
-                          team_1_script, team_2_script)
-        initial_positions_team_left, initial_positions_team_right = randomize_initial_positions()
-
-    return team_1_score, team_2_score
-
-
-def randomize_initial_positions():
-    displacement = random.randint(0, 10)
-    p1 = [int((center[0] - playground[0]) / 2) + playground[0] - displacement, post_screen_top]
-    p2 = [int((center[0] - playground[0]) / 2) + playground[0] - displacement, center[1]]
-    p3 = [int((center[0] - playground[0]) / 2) + playground[0] - displacement, post_screen_bottom]
-    p4 = [p1[0] + half_playground_rect[2] + displacement, post_screen_top]
-    p5 = [p2[0] + half_playground_rect[2] + displacement, center[1]]
-    p6 = [p3[0] + half_playground_rect[2] + displacement, post_screen_bottom]
-    return [p1, p2, p3], [p4, p5, p6]
-
-
-def build_teams(t1_props, t2_props):
-    """Construct Player lists from team property dicts."""
-    def make_team(props):
-        return [
-            Player(
-                props['player_names'][i],
-                get_weight(props['weight_points'][i]),
-                get_radius(props['radius_points'][i]),
-                get_acceleration(props['max_acceleration_points'][i]),
-                get_speed(props['max_speed_points'][i]),
-                get_shot_power(props['shot_power_points'][i])
-            ) for i in range(3)
-        ]
-    return make_team(t1_props), make_team(t2_props)
-
-
-if __name__ == "__main__":
-    team_1_properties = team_1_script.team_properties()
-    team_2_properties = team_2_script.team_properties()
-
-    team_1, team_2 = build_teams(team_1_properties, team_2_properties)
-
-    # Ova za posts i ball e isto
-    the_ball = Ball(420, 250, 15, 0.5)
-    the_posts = [Post(post_screen_left, post_screen_top, post_radius, post_mass),
-                 Post(post_screen_left, post_screen_bottom, post_radius, post_mass),
-                 Post(post_screen_right, post_screen_top, post_radius, post_mass),
-                 Post(post_screen_right, post_screen_bottom, post_radius, post_mass)]
-
-    if HEADLESS:
-        s1, s2 = game_headless(team_1, team_2, the_ball, the_posts,
-                               team_1_script, team_2_script)
-        print("Result: {}  {}:{}  {}".format(
-            team_1_properties['team_name'], s1, s2, team_2_properties['team_name']))
-    else:
-
-        # logos must be loaded before game() because render() references them
-        base_path = os.path.dirname(os.path.abspath(__file__))
-
-        red_logo = pygame.image.load(
-            os.path.join(base_path, 'Team_name', team_1_properties['image_name']))
-        blue_logo = pygame.image.load(
-            os.path.join(base_path, 'Test_team', team_2_properties['image_name']))
-
-        logos = {team_1_properties['team_name']: red_logo,
-                team_2_properties['team_name']: blue_logo}
-        
-
-        # logos must be loaded before game() because render() references them
-        # base_path = os.path.dirname(__file__)
-        # red_logo = pygame.image.load(
-        #    os.path.join(base_path, 'Team_name', team_1_properties['image_name']))
-        # blue_logo = pygame.image.load(
-        #    os.path.join(base_path, 'Test_team', team_2_properties['image_name']))
-        # logos = {team_1_properties['team_name']: red_logo,
-        #         team_2_properties['team_name']: blue_logo}
-
-        s1, s2 = game(team_1, team_2, the_ball, the_posts,
-                      team_1_properties['team_name'], team_2_properties['team_name'],
-                      red, blue, team_1_script, team_2_script)
-        print("Result: {}  {}:{}  {}".format(
-            team_1_properties['team_name'], s1, s2, team_2_properties['team_name']))
+        reward += self._proximity_penalty("att")
+        return reward
