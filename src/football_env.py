@@ -272,7 +272,9 @@ class AIFootballEnv(ParallelEnv):
         dist_to_ball = np.sqrt((ball.x - player.x)**2 + (ball.y - player.y)**2)
 
         # Трча кон топка
-        reward += max(0.0, 1.5 - dist_to_ball / 400.0)
+        # Наградувај ја компонентата на брзината кон десната врата
+        ball_vx = self.ball.v * np.cos(self.ball.alpha)
+        reward += np.clip(ball_vx / 200.0, -1.0, 1.0) * 3.0
 
 #        # Допир во одбранбена зона
         touched = dist_to_ball < (player.radius + ball.radius + 5)
@@ -328,6 +330,30 @@ class AIFootballEnv(ParallelEnv):
         # Топката е блиску до противничката врата
         dist_ball_goal = np.sqrt((GOAL_X_RIGHT - ball.x)**2 + (GOAL_CY - ball.y)**2)
         reward += max(0.0, 2.0 - dist_ball_goal / 600.0)
+
+        # блиску до спротивен гол -> продолжи напред, блиску до наш -> заобиколи
+        dist_ball_our_goal   = np.sqrt((GOAL_X_LEFT  - ball.x)**2 + (GOAL_CY - ball.y)**2)
+        dist_ball_their_goal = np.sqrt((GOAL_X_RIGHT - ball.x)**2 + (GOAL_CY - ball.y)**2)
+        
+        ball_vx = ball.v * np.cos(ball.alpha)  # позитивно = кон нивниот гол
+        
+        if dist_ball_our_goal < dist_ball_their_goal:
+            # Топката е на наша страна — сакаме att да е ЛЕВО од топката
+            # и да ја носи десно
+            if player.x < ball.x:
+                reward += 2.0  # добра позиција за да ја турка напред
+            if ball_vx > 0:
+                reward += ball_vx / 200.0 * 3.0  # топката оди кон нивниот гол
+            if ball_vx < 0:
+                reward -= abs(ball_vx) / 200.0 * 5.0  # казна — топката оди кон нашиот гол
+        else:
+            # Топката е на нивна страна — директен напад
+            if touched:
+                angle_to_goal = np.arctan2(GOAL_CY - ball.y, GOAL_X_RIGHT - ball.x)
+                alignment     = np.cos(ball.alpha - angle_to_goal)
+                reward       += alignment * 5.0
+            if ball_vx > 0:
+                reward += ball_vx / 200.0 * 4.0
 
         reward += self._proximity_penalty("att")
         return reward
