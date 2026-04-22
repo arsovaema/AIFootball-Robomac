@@ -1,85 +1,122 @@
+# football_env.py
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import functools
 import numpy as np
 from pettingzoo import ParallelEnv
 from gymnasium import spaces
-
-# Import the physics objects from your existing game file
 from AIFootball import Player, Ball, dt, resolve_collision, initial_positions_team_left
+
+# ── Константи ──────────────────────────────────────────────────────────────
+FIELD_W      = 1366.0
+FIELD_H      = 768.0
+GOAL_X_LEFT  = 50
+GOAL_X_RIGHT = 1316
+GOAL_TOP     = 343
+GOAL_BOT     = 578
+GOAL_CY      = (GOAL_TOP + GOAL_BOT) / 2
+
+GK_X_LOCK  = 85
+GK_Y_MIN   = GOAL_TOP
+GK_Y_MAX   = GOAL_BOT
+GK_GOAL_CY = GOAL_CY
 
 
 class AIFootballEnv(ParallelEnv):
-    metadata = {
-        "name": "aifootball_v0",
-    }
+    metadata = {"name": "aifootball_v0"}
 
     def __init__(self, render_mode=None):
-        # 1. Define our specific independent agents
         super().__init__()
-        self.render_mode=render_mode
+        self.render_mode     = render_mode
         self.possible_agents = ["gk", "def", "att"]
-        self.agents = self.possible_agents[:]
-        
-        # Define maximums based on your team_properties()
-        # For mapping neural network outputs (-1 to 1) to actual game values
-        self.max_force = 200 * 0.75      # Example based on your AIFootball.py coefficients
-        self.max_shot_power = 200 * 0.95
+        self.agents          = self.possible_agents[:]
+        self.max_force       = 200 * 0.75
+        self.max_shot_power  = 200 * 0.95
 
+    # ── Observation spaces — различни за секој агент ──────────────────────
     @functools.lru_cache(maxsize=None)
     def observation_space(self, agent):
-        # The AI needs to see the game state.
-        # Let's say we give it 14 numbers:
-        # [self.x, self.y, self.v, self.alpha, ball.x, ball.y, ball.v, ball.alpha, + teammates/opponents]
-        # We normalize everything between -1.0 and 1.0 so the neural network learns faster.
-        return spaces.Box(low=-1.0, high=1.0, shape=(14,), dtype=np.float32)
+        if agent == "gk":
+            return spaces.Box(low=-1.0, high=1.0, shape=(5,), dtype=np.float32)
+        elif agent == "def":
+            return spaces.Box(low=-1.0, high=1.0, shape=(12,), dtype=np.float32)
+        else:  # att
+            return spaces.Box(low=-1.0, high=1.0, shape=(12,), dtype=np.float32)
 
+    # ── Action spaces — различни за секој агент ───────────────────────────
     @functools.lru_cache(maxsize=None)
     def action_space(self, agent):
-        # The AI will output 4 continuous numbers between -1.0 and 1.0.
-        # We will translate these to: [force, alpha, shot_power, shot_request]
-        return spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
+        if agent == "gk":
+            return spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
+        elif agent == "def":
+            return spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
+        else:  # att
+            return spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
 
+    # ── Reset ─────────────────────────────────────────────────────────────
     def reset(self, seed=None, options=None):
-        self.agents = self.possible_agents[:]
+        self.agents   = self.possible_agents[:]
         self.timestep = 0
 
-        # Initialize the physics objects from your AIFootball.py
+        # FIX 6: flag за да се регистрира гол само еднаш
+        self.goal_scored = False
+
         self.our_team = {
-            "gk":  Player("Nate",   weight=9,  radius=20, acceleration=40, speed=40, shot_power=18),
-            "def": Player("Cassie", weight=10, radius=10, acceleration=10, speed=10, shot_power=20),
-            "att": Player("Maddie", weight=15, radius=5,  acceleration=15, speed=25, shot_power=13),
+            "gk":  Player("Nate",   weight=20, radius=20, acceleration=40, speed=40, shot_power=30),
+            "def": Player("Maddie", weight=15, radius=15, acceleration=10, speed=15, shot_power=25),
+            "att": Player("Cassie", weight=15, radius=20, acceleration=15, speed=25, shot_power=18),
         }
 
-        # Reset positions to standard starting spots
-        self.our_team["gk"].reset(initial_positions_team_left[0], 0)
+        self.our_team["gk"].x     = GK_X_LOCK
+        self.our_team["gk"].y     = GK_GOAL_CY
+        self.our_team["gk"].alpha = 0
+        self.our_team["gk"].v     = 0
+
         self.our_team["def"].reset(initial_positions_team_left[1], 0)
         self.our_team["att"].reset(initial_positions_team_left[2], 0)
 
         self.ball = Ball()
         self.ball.reset()
 
-        observations = {agent: self._get_obs(agent) for agent in self.agents}
-        infos = {agent: {} for agent in self.agents}
+        # FIX 3: иницијализирај prev_dist_* веднаш во reset() за да не се добие
+        # AttributeError при првиот повик на _reward_gk() / _reward_def()
+        att  = self.our_team["att"]
+        gk   = self.our_team["gk"]
+        defp = self.our_team["def"]
+        self.prev_dist_att_gk  = np.sqrt((att.x  - gk.x)**2   + (att.y  - gk.y)**2)
+        self.prev_dist_def_gk  = np.sqrt((defp.x - gk.x)**2   + (defp.y - gk.y)**2)
+        self.prev_dist_att_def = np.sqrt((att.x  - defp.x)**2  + (att.y  - defp.y)**2)
 
+        observations = {agent: self._get_obs(agent) for agent in self.agents}
+        infos        = {agent: {}                   for agent in self.agents}
         return observations, infos
 
+    # ── Step ──────────────────────────────────────────────────────────────
     def step(self, actions):
         self.timestep += 1
 
-        # 1. APPLY ACTIONS
-        for agent_id, action_array in actions.items():
-            player = self.our_team[agent_id]
+        # 1. ГОЛМАНОТ — само Y движење
+        gk     = self.our_team["gk"]
+        new_y  = np.clip(gk.y + actions["gk"][0] * gk.v_max * dt, GK_Y_MIN, GK_Y_MAX)
+        gk.x   = GK_X_LOCK
+        gk.y   = new_y
+        gk.v   = 0
 
-            # Map the Neural Network output (-1.0 to 1.0) back to your manager.py dictionary format
-            decision = {
+        # 2. DEF и ATT — полна контрола
+        for agent_id in ["def", "att"]:
+            action_array = actions[agent_id]
+            player       = self.our_team[agent_id]
+            decision     = {
                 "force":        action_array[0] * self.max_force,
                 "alpha":        action_array[1] * np.pi,
                 "shot_power":   abs(action_array[2] * self.max_shot_power),
-                "shot_request": True if action_array[3] > 0 else False,
+                "shot_request": action_array[3] > 0,
             }
-
             player.move(decision)
 
-        # 2. STEP PHYSICS
+        # 3. PHYSICS
         self.ball.move()
         self.ball.snelius()
         for player in self.our_team.values():
@@ -87,19 +124,49 @@ class AIFootballEnv(ParallelEnv):
             if self._check_collision(player, self.ball):
                 resolve_collision(player, self.ball)
 
-        # 3. CALCULATE REWARDS
+        # 4. Заклучи го голманот по колизии
+        gk.x = GK_X_LOCK
+        gk.y = np.clip(gk.y, GK_Y_MIN, GK_Y_MAX)
+        gk.v = 0
+
+        # Пресметај тековни дистанци
+        att  = self.our_team["att"]
+        gk   = self.our_team["gk"]
+        defp = self.our_team["def"]
+        curr_dist_att_gk  = np.sqrt((att.x  - gk.x)**2   + (att.y  - gk.y)**2)
+        curr_dist_def_gk  = np.sqrt((defp.x - gk.x)**2   + (defp.y - gk.y)**2)
+        curr_dist_att_def = np.sqrt((att.x  - defp.x)**2  + (att.y  - defp.y)**2)
+
+        # Зачувај за rewards
+        self.curr_dist_att_gk  = curr_dist_att_gk
+        self.curr_dist_def_gk  = curr_dist_def_gk
+        self.curr_dist_att_def = curr_dist_att_def
+
+        # FIX 6: провери гол само ако уште не е регистриран
+        just_scored_goal = False
+        if not self.goal_scored:
+            if (self.ball.x > GOAL_X_RIGHT and
+    GOAL_TOP < self.ball.y < GOAL_BOT):
+                self.goal_scored  = True
+                just_scored_goal  = True
+
+        # FIX 1+2: само едно место за rewards, без дупликат
         rewards = {
-            "gk":  self._calculate_gk_reward(),
-            "def": self._calculate_def_reward(),
-            "att": self._calculate_att_reward(),
+            "gk":  self._reward_gk(),
+            "def": self._reward_def(just_scored_goal),
+            "att": self._reward_att(just_scored_goal),
         }
 
-        # 4. CHECK END STATE
-        env_done = self.timestep >= 3000  # ~50 seconds at 60fps
+        # Ажурирај претходни дистанци — само еднаш, на крај
+        self.prev_dist_att_gk  = curr_dist_att_gk
+        self.prev_dist_def_gk  = curr_dist_def_gk
+        self.prev_dist_att_def = curr_dist_att_def
 
+        # 6. END STATE
+        env_done     = self.timestep >= 3000 or self.goal_scored
         terminations = {agent: env_done for agent in self.agents}
-        truncations  = {agent: False     for agent in self.agents}
-        infos        = {agent: {}        for agent in self.agents}
+        truncations  = {agent: False    for agent in self.agents}
+        infos        = {agent: {}       for agent in self.agents}
         observations = {agent: self._get_obs(agent) for agent in self.agents}
 
         if env_done:
@@ -107,232 +174,160 @@ class AIFootballEnv(ParallelEnv):
 
         return observations, rewards, terminations, truncations, infos
 
-    # -------------------------------------------------------------------------
-    # Helper: observation builder
-    # -------------------------------------------------------------------------
+    # ── Observations ──────────────────────────────────────────────────────
     def _get_obs(self, agent_id):
-        """
-        Translates the game state into a 14-number array for the neural network.
-        Everything is normalised between -1.0 and 1.0.
-        """
         player = self.our_team[agent_id]
 
-        MAX_X = 1366.0
-        MAX_Y = 768.0
-        MAX_V = player.v_max if player.v_max > 0 else 1.0
+        def nx(v): return (v / FIELD_W) * 2.0 - 1.0
+        def ny(v): return (v / FIELD_H) * 2.0 - 1.0
+        def nv(v, mx): return np.clip(v / max(mx, 1), 0, 1) * 2.0 - 1.0
 
-        # 1. Agent's own state (4 values)
-        my_x    = (player.x / MAX_X) * 2.0 - 1.0
-        my_y    = (player.y / MAX_Y) * 2.0 - 1.0
-        my_v    = (player.v / MAX_V) * 2.0 - 1.0
-        my_alpha = player.alpha / np.pi
+        ball = self.ball
 
-        # 2. Ball's state (4 values)
-        ball_x    = (self.ball.x / MAX_X) * 2.0 - 1.0
-        ball_y    = (self.ball.y / MAX_Y) * 2.0 - 1.0
-        ball_v    = (self.ball.v / self.ball.v_max) * 2.0 - 1.0
-        ball_alpha = self.ball.alpha / np.pi
+        if agent_id == "gk":
+            dist = np.sqrt((ball.x - player.x)**2 + (ball.y - player.y)**2)
+            return np.array([
+                ny(player.y),
+                nx(ball.x),
+                ny(ball.y),
+                nv(ball.v, ball.v_max),
+                np.clip(dist / FIELD_W, 0, 1) * 2 - 1,
+            ], dtype=np.float32)
 
-        # 3. Teammate positions (4 values)
-        teammate_coords = []
-        for other_id, other_player in self.our_team.items():
-            if other_id != agent_id:
-                teammate_coords.append((other_player.x / MAX_X) * 2.0 - 1.0)
-                teammate_coords.append((other_player.y / MAX_Y) * 2.0 - 1.0)
+        elif agent_id == "def":
+            att = self.our_team["att"]
+            return np.array([
+                nx(player.x),  ny(player.y),
+                nv(player.v, player.v_max),
+                player.alpha / np.pi,
+                nx(ball.x),    ny(ball.y),
+                nv(ball.v, ball.v_max),
+                ball.alpha / np.pi,
+                nx(att.x),     ny(att.y),
+                nx(GOAL_X_RIGHT), ny(GOAL_CY),
+            ], dtype=np.float32)
 
-        # 4. Target goal position (2 values) — attacking the right goal
-        goal_x = (1316.0 / MAX_X) * 2.0 - 1.0
-        goal_y = (460.0  / MAX_Y) * 2.0 - 1.0
+        else:  # att
+            defp = self.our_team["def"]
+            return np.array([
+                nx(player.x),  ny(player.y),
+                nv(player.v, player.v_max),
+                player.alpha / np.pi,
+                nx(ball.x),    ny(ball.y),
+                nv(ball.v, ball.v_max),
+                ball.alpha / np.pi,
+                nx(defp.x),    ny(defp.y),
+                nx(GOAL_X_RIGHT), ny(GOAL_CY),
+            ], dtype=np.float32)
 
-        observation = np.array([
-            my_x, my_y, my_v, my_alpha,
-            ball_x, ball_y, ball_v, ball_alpha,
-            teammate_coords[0], teammate_coords[1],
-            teammate_coords[2], teammate_coords[3],
-            goal_x, goal_y,
-        ], dtype=np.float32)
+    # ── Collision check ───────────────────────────────────────────────────
+    def _check_collision(self, c1, c2):
+        return (c1.x-c2.x)**2 + (c1.y-c2.y)**2 <= (c1.radius+c2.radius)**2
 
-        return observation
+    def _proximity_penalty(self, agent_id):
+        player  = self.our_team[agent_id]
+        penalty = 0.0
 
-    # -------------------------------------------------------------------------
-    # Helper: collision check
-    # -------------------------------------------------------------------------
-    def _check_collision(self, circle_1, circle_2):
-        dist_sq = (circle_1.x - circle_2.x) ** 2 + (circle_1.y - circle_2.y) ** 2
-        radius_sum_sq = (circle_1.radius + circle_2.radius) ** 2
-        return dist_sq <= radius_sum_sq
+        for other_id, other in self.our_team.items():
+            if other_id == agent_id:
+                continue
+            dist     = np.sqrt((player.x - other.x)**2 + (player.y - other.y)**2)
+            min_dist = player.radius + other.radius
+            safe_dist = min_dist * 4
 
-    # -------------------------------------------------------------------------
-    # Helper: possession weights
-    # -------------------------------------------------------------------------
-    def _get_possession_weights(self):
-        """
-        Returns (weights, distances) for each agent.
+            if dist < safe_dist:
+                penalty -= (1.0 - dist / safe_dist) * 50.0
 
-        weights: dict[agent_id -> float in (0, 1)], sum == 1.0
-            The player closest to the ball gets a weight near 1.0;
-            others taper off smoothly via a softmin over distances.
+        return penalty
 
-        distances: dict[agent_id -> float]
-            Raw Euclidean distance from each player to the ball.
+    # ── Rewards ───────────────────────────────────────────────────────────
+    def _reward_gk(self):
+        gk   = self.our_team["gk"]
+        ball = self.ball
 
-        Tuning:
-            T (temperature) controls how sharply possession is awarded.
-            Lower T  -> winner-takes-all (e.g. T=80)
-            Higher T -> smoother three-way sharing (e.g. T=300)
-        """
-        T = 150.0
+        # Казна ако топката влезе во сопствениот гол
+        if ball.x < GOAL_X_LEFT and GOAL_TOP < ball.y < GOAL_BOT:
+            return -100.0
 
-        distances = {
-            agent_id: np.sqrt(
-                (self.ball.x - player.x) ** 2 + (self.ball.y - player.y) ** 2
-            )
-            for agent_id, player in self.our_team.items()
-        }
-
-        # Softmin: closest player gets the highest exponential value
-        inv   = {k: np.exp(-v / T) for k, v in distances.items()}
-        total = sum(inv.values())
-        weights = {k: v / total for k, v in inv.items()}
-
-        return weights, distances
-
-    # -------------------------------------------------------------------------
-    # Rewards
-    # -------------------------------------------------------------------------
-    def _calculate_gk_reward(self):
-        """
-        Goalkeeper — Nate.
-
-        Ball possession mode  (w ≈ 1): chase ball, make saves.
-        Formation mode        (w ≈ 0): stay near the left goal mouth.
-        Always: massive penalty for conceding.
-        """
-        player = self.our_team["gk"]
-        weights, distances = self._get_possession_weights()
-        w = weights["gk"]
         reward = 0.0
 
-        # --- Ball possession mode ---
-        ball_reward = 0.0
-        dist_to_ball = distances["gk"]
+        # Порамнување по Y со топката
+        ideal_y = np.clip(ball.y, GK_Y_MIN, GK_Y_MAX)
+        dy      = abs(gk.y - ideal_y)
+        reward += max(0.0, 1.0 - dy / 120.0)
 
-        # Reward for closing down the ball (useful for clearing danger)
-        ball_reward += max(0, 2.0 - (dist_to_ball / 150))
-
-        # Extra reward for physically touching the ball in own half (a save / clearance)
-        if dist_to_ball < 30 and player.x < 300:
-            ball_reward += 5.0
-
-        # --- Formation mode ---
-        form_reward = 0.0
-        dist_to_goal = np.sqrt((50 - player.x) ** 2 + (460 - player.y) ** 2)
-
-        if dist_to_goal < 150:
-            form_reward += 0.2          # Good: staying in the box
-        else:
-            form_reward -= dist_to_goal / 800   # Penalty for wandering
-
-        # --- Blend by possession weight ---
-        reward += w * ball_reward + (1 - w) * form_reward
-
-        # --- Always-on penalty: conceding a goal ---
-        if self.ball.x < 50 and 343 < self.ball.y < 578:
-            reward -= 100.0
-
+        #reward += self._proximity_penalty("gk")
         return reward
 
-    def _calculate_def_reward(self):
-        """
-        Defender — Cassie.
-
-        Ball possession mode  (w ≈ 1): intercept and clear forward.
-        Formation mode        (w ≈ 0): triangulate between GK and ATT to hold shape.
-        Always: penalty for pushing too far forward.
-        """
+    # FIX 5: just_scored_goal параметар — само att и def добиваат гол reward
+    def _reward_def(self, just_scored_goal=False):
         player = self.our_team["def"]
-        weights, distances = self._get_possession_weights()
-        w = weights["def"]
+        ball   = self.ball
         reward = 0.0
 
-        # --- Ball possession mode ---
-        ball_reward = 0.0
-        dist_to_ball = distances["def"]
+        # FIX 5: def добива reward за гол (но не толку голем колку att)
+        if just_scored_goal:
+            return 50.0
 
-        # Reward for closing down the ball
-        ball_reward += max(0, 1.5 - (dist_to_ball / 400))
+        dist_to_ball = np.sqrt((ball.x - player.x)**2 + (ball.y - player.y)**2)
 
-        # Clearance bonus: ball moving into the opponent half after DEF interaction
-        if self.ball.v > 10 and self.ball.x > 683:
-            ball_reward += 1.0
+        # Трча кон топка
+        reward += max(0.0, 1.5 - dist_to_ball / 400.0)
 
-        # --- Formation mode: stay between GK and ATT ---
-        form_reward = 0.0
-        gk  = self.our_team["gk"]
+#        # Допир во одбранбена зона
+        touched = dist_to_ball < (player.radius + ball.radius + 5)
+#        if touched and player.x < 683:
+#            reward += 5.0
+
+        # Топката оди напред по допир
+        if touched and np.cos(ball.alpha) > 0.3 and ball.v > 50:
+            reward += 3.0
+
+        # Formation: стој помеѓу gk и att
+#        gk  = self.our_team["gk"]
+#        att = self.our_team["att"]
+#        ideal_x = (gk.x + att.x) / 2.0
+#        ideal_y = (gk.y + att.y) / 2.0
+#        dist_ideal = np.sqrt((ideal_x - player.x)**2 + (ideal_y - player.y)**2)
+#        reward += max(0.0, 0.5 - dist_ideal / 400.0)
+
+        # Ако att и def се преклопуваат
         att = self.our_team["att"]
+        min_att_def = player.radius + att.radius
+        if self.curr_dist_att_def < min_att_def:
+            if self.curr_dist_att_def > self.prev_dist_att_def:
+                reward += 5.0
+            else:
+                reward -= 5.0
 
-        ideal_x = (gk.x + att.x) / 2.0
-        ideal_y = (gk.y + att.y) / 2.0
-        dist_to_ideal = np.sqrt(
-            (ideal_x - player.x) ** 2 + (ideal_y - player.y) ** 2
-        )
-        form_reward += max(0, 1.0 - (dist_to_ideal / 300))
-
-        # --- Always-on penalty: over-committing up the pitch ---
-        if player.x > 800:
-            reward -= 0.5
-
-        # --- Blend ---
-        reward += w * ball_reward + (1 - w) * form_reward
-
+        reward += self._proximity_penalty("def")
         return reward
 
-    def _calculate_att_reward(self):
-        """
-        Attacker — Maddie.
-
-        Ball possession mode  (w ≈ 1): dribble, shoot, score.
-        Formation mode        (w ≈ 0): make runs into the attacking third.
-        Always: penalty for sitting in own half.
-        """
+    # FIX 5: just_scored_goal параметар — att добива biggest reward за гол
+    def _reward_att(self, just_scored_goal=False):
         player = self.our_team["att"]
-        weights, distances = self._get_possession_weights()
-        w = weights["att"]
+        ball   = self.ball
         reward = 0.0
 
-        # --- Ball possession mode ---
-        ball_reward = 0.0
-        dist_to_ball = distances["att"]
+        # FIX 5+6: гол се регистрира преку just_scored_goal flag, не секој frame
+        if just_scored_goal:
+            return 100.0
 
-        # Reward for being on the ball
-        ball_reward += max(0, 2.0 - (dist_to_ball / 250))
+        dist_to_ball = np.sqrt((ball.x - player.x)**2 + (ball.y - player.y)**2)
 
-        # Reward for ball being close to the enemy goal
-        dist_ball_to_goal = np.sqrt(
-            (1316 - self.ball.x) ** 2 + (460 - self.ball.y) ** 2
-        )
-        ball_reward += max(0, 5.0 - (dist_ball_to_goal / 200))
+        # Допир со топката
+        touched = dist_to_ball < (player.radius + ball.radius + 5)
+        if touched:
+            reward += 10.0
+            if np.cos(ball.alpha) > 0.5 and ball.v > 30:
+                reward += 3.0
 
-        # GOAL!
-        if self.ball.x > 1316 and 343 < self.ball.y < 578:
-            ball_reward += 100.0
+        # Трча кон топката
+        reward += max(0.0, 2.0 - dist_to_ball / 300.0)
 
-        # --- Formation mode: make dangerous runs ---
-        form_reward = 0.0
+        # Топката е блиску до противничката врата
+        dist_ball_goal = np.sqrt((GOAL_X_RIGHT - ball.x)**2 + (GOAL_CY - ball.y)**2)
+        reward += max(0.0, 2.0 - dist_ball_goal / 600.0)
 
-        # Reward for being in the attacking third, ready to receive
-        if player.x > 900:
-            form_reward += 0.3
-
-        # Reward for being central (more dangerous position)
-        dist_to_centre_y = abs(player.y - 460)
-        form_reward += max(0, 0.5 - (dist_to_centre_y / 300))
-
-        # --- Always-on penalty: camping in own half ---
-        if player.x < 300:
-            reward -= 0.5
-
-        # --- Blend ---
-        reward += w * ball_reward + (1 - w) * form_reward
-
+        reward += self._proximity_penalty("att")
         return reward
